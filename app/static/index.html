@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b1220">
+<meta name="description" content="Rip audio CDs to your NAS from the browser. Self-hosted, Docker ready, made for ZimaOS.">
+<title>RipCD - CD ripper</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="bg-glow" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" class="logo" aria-hidden="true">
+      <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2"/>
+      <circle cx="16" cy="16" r="4.5" fill="none" stroke="currentColor" stroke-width="2"/>
+      <circle cx="16" cy="16" r="1.6" fill="currentColor"/>
+      <path d="M22 8.5 A9.5 9.5 0 0 1 25.4 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+    <span class="brand-name">Rip<strong>CD</strong></span>
+    <span class="badge" id="demoBadge" hidden>DEMO</span>
+    <span class="version" id="versionLabel"></span>
+  </div>
+
+  <div class="drive-pill" id="drivePill" title="Optical drive status">
+    <span class="dot" id="driveDot"></span>
+    <span class="drive-text" id="driveText">looking for a drive…</span>
+  </div>
+
+  <div class="topbar-actions">
+    <span class="live" id="liveIndicator" title="Live updates"><span class="live-dot"></span>live</span>
+    <button class="btn ghost" id="btnRescan" title="Re-read the disc and the drives">Rescan</button>
+    <button class="btn ghost" id="btnEject" title="Open the tray">Eject</button>
+    <button class="btn ghost" id="btnLogs" title="Show the activity log">Logs</button>
+    <button class="btn ghost" id="btnSettings" title="Application settings">Settings</button>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="column main-column">
+    <div class="card disc-card" id="discCard"></div>
+
+    <div class="card tracks-card" id="tracksCard" hidden>
+      <div class="card-head">
+        <h2>Tracks</h2>
+        <span class="muted" id="trackSummary"></span>
+        <div class="spacer"></div>
+        <button class="btn tiny" id="btnAllTracks">All</button>
+        <button class="btn tiny" id="btnNoTracks">None</button>
+        <button class="btn tiny" id="btnInvertTracks">Invert</button>
+      </div>
+      <div class="track-table" id="trackTable"></div>
+    </div>
+
+    <div class="card job-card" id="jobCard" hidden></div>
+    <div class="card history-card" id="historyCard" hidden></div>
+  </section>
+
+  <aside class="column side-column">
+    <div class="card options-card">
+      <div class="card-head"><h2>Rip settings</h2></div>
+
+      <label class="field">
+        <span class="label">Save to</span>
+        <div class="row">
+          <input type="text" id="outputDir" spellcheck="false" placeholder="/media/Music">
+          <button class="btn" id="btnBrowse" title="Browse folders">Browse…</button>
+        </div>
+        <small class="hint" id="outputStatus"></small>
+      </label>
+
+      <div class="grid-2">
+        <label class="field">
+          <span class="label">Format</span>
+          <select id="formatSelect"></select>
+        </label>
+        <label class="field">
+          <span class="label">Quality</span>
+          <select id="qualitySelect"></select>
+        </label>
+      </div>
+
+      <details class="advanced">
+        <summary>Advanced options</summary>
+        <div class="grid-2">
+          <label class="field">
+            <span class="label">Read quality</span>
+            <select id="paranoiaSelect"></select>
+          </label>
+          <label class="field">
+            <span class="label">Read speed</span>
+            <select id="speedSelect">
+              <option value="0">Drive default</option>
+              <option value="4">4x (quiet)</option>
+              <option value="8">8x</option>
+              <option value="16">16x</option>
+              <option value="24">24x</option>
+              <option value="48">48x (fastest)</option>
+            </select>
+          </label>
+        </div>
+        <label class="field">
+          <span class="label">Metadata source</span>
+          <select id="providerSelect"></select>
+        </label>
+        <label class="field">
+          <span class="label">Album folder</span>
+          <input type="text" id="albumTemplate" spellcheck="false">
+          <small class="hint">Fields: {album_artist} {album} {year} {genre} {disc}</small>
+        </label>
+        <label class="field">
+          <span class="label">File name</span>
+          <input type="text" id="trackTemplate" spellcheck="false">
+          <small class="hint">Fields: {track:02d} {title} {artist} {album} {year}</small>
+        </label>
+        <div class="toggles">
+          <label class="toggle"><input type="checkbox" id="optCover"><span>Embed cover art</span></label>
+          <label class="toggle"><input type="checkbox" id="optPlaylist"><span>Write <code>.m3u8</code> playlist</span></label>
+          <label class="toggle"><input type="checkbox" id="optEject"><span>Eject when finished</span></label>
+          <label class="toggle"><input type="checkbox" id="optKeepWav"><span>Keep WAV files</span></label>
+        </div>
+        <div class="preview-box">
+          <span class="label">Preview</span>
+          <div class="preview" id="pathPreview">select a disc to see the file names</div>
+        </div>
+      </details>
+
+      <button class="btn primary big" id="btnStartRip" disabled>Insert a CD to start</button>
+      <small class="hint center" id="ripHint"></small>
+    </div>
+
+    <div class="card mock-card" id="mockCard" hidden>
+      <div class="card-head"><h2>Demo discs</h2></div>
+      <p class="muted small">This instance runs in demo mode: no real drive is used. Insert a virtual disc to try everything.</p>
+      <div class="mock-list" id="mockList"></div>
+      <div class="row">
+        <button class="btn" id="btnMockEject">Eject</button>
+        <button class="btn" id="btnMockClose">Close tray</button>
+      </div>
+    </div>
+
+    <div class="card help-card">
+      <div class="card-head"><h2>Tips</h2></div>
+      <ul class="tips" id="tipsList">
+        <li>Pass <code>/dev/sr0</code> and <code>/dev/sg*</code> into the container, otherwise no drive is found.</li>
+        <li>Rips land in <code>Save to</code> + the album folder template.</li>
+        <li>Enable <em>auto-rip</em> in Settings to start ripping as soon as a CD is inserted.</li>
+      </ul>
+    </div>
+  </aside>
+</main>
+
+<footer class="footer">
+  <span id="footerMeta"></span>
+  <div class="spacer"></div>
+  <a href="https://github.com/Delgame880/RipCd-Docker" target="_blank" rel="noreferrer">GitHub</a>
+</footer>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<!-- folder browser -->
+<div class="modal" id="browserModal" hidden>
+  <div class="modal-panel">
+    <div class="modal-head">
+      <h2>Choose a folder</h2>
+      <button class="btn ghost icon" data-close>✕</button>
+    </div>
+    <div class="crumbs" id="browserCrumbs"></div>
+    <div class="browser-list" id="browserList"></div>
+    <div class="modal-foot">
+      <div class="row grow">
+        <input type="text" id="newFolderName" placeholder="New folder name">
+        <button class="btn" id="btnNewFolder">Create</button>
+      </div>
+      <button class="btn" data-close>Cancel</button>
+      <button class="btn primary" id="btnUseFolder">Use this folder</button>
+    </div>
+  </div>
+</div>
+
+<!-- application settings -->
+<div class="modal" id="settingsModal" hidden>
+  <div class="modal-panel wide">
+    <div class="modal-head">
+      <h2>Settings</h2>
+      <button class="btn ghost icon" data-close>✕</button>
+    </div>
+    <div class="modal-body">
+      <section class="settings-section">
+        <h3>Disc detection</h3>
+        <label class="toggle"><input type="checkbox" id="setAutoscan"><span>Watch the drive automatically (recommended)</span></label>
+        <label class="toggle"><input type="checkbox" id="setAutoRip"><span>Start ripping automatically when a CD is inserted</span></label>
+        <label class="field">
+          <span class="label">Auto-rip delay (seconds)</span>
+          <input type="number" id="setAutoRipDelay" min="0" max="600" step="5">
+          <small class="hint">Gives you time to cancel and lets the metadata lookup finish.</small>
+        </label>
+        <label class="field">
+          <span class="label">Poll interval (seconds)</span>
+          <input type="number" id="setPoll" min="2" max="120" step="1">
+        </label>
+        <label class="field">
+          <span class="label">Drive</span>
+          <select id="setDevice"></select>
+        </label>
+      </section>
+
+      <section class="settings-section">
+        <h3>Access</h3>
+        <label class="field">
+          <span class="label">API token</span>
+          <input type="text" id="setToken" spellcheck="false" placeholder="empty = no password (LAN only)">
+          <small class="hint">When set, the UI and the API require <code>?token=…</code>. Clear it to disable.</small>
+        </label>
+      </section>
+
+      <section class="settings-section">
+        <h3>Folders the container may write to</h3>
+        <p class="muted small">Configured with <code>RIPCD_MEDIA_ROOTS</code> in <code>docker-compose.yml</code>.</p>
+        <div class="roots" id="settingsRoots"></div>
+      </section>
+
+      <section class="settings-section">
+        <h3>Diagnostics</h3>
+        <div class="diag" id="settingsDiag"></div>
+        <button class="btn" id="btnRecheckTools">Re-check tools</button>
+        <button class="btn ghost" id="btnResetSettings">Reset settings</button>
+      </section>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-close>Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- activity log -->
+<div class="modal" id="logModal" hidden>
+  <div class="modal-panel wide">
+    <div class="modal-head">
+      <h2>Activity log</h2>
+      <button class="btn ghost icon" data-close>✕</button>
+    </div>
+    <div class="log-view" id="logView"></div>
+    <div class="modal-foot">
+      <button class="btn" id="btnClearLogs">Clear</button>
+      <button class="btn ghost" data-close>Close</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

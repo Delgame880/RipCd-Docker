@@ -1,0 +1,152 @@
+# RipCD - docker compose file for ZimaOS / CasaOS / any Docker host.
+#
+# Install on ZimaOS:  App Store -> "Install a custom app" -> paste this file.
+# Everywhere else:    docker compose up -d
+#
+# THE TWO THINGS THAT MATTER
+#   1. the CD/DVD drive must be passed into the container, both the block
+#      device (/dev/sr0) and its SCSI generic sibling (/dev/sg0) - run
+#      `lsscsi -g` on the host to find the names
+#   2. the share where the music should land must be mounted below /media
+#
+# A commented copy with ZimaOS specific values is in docs/INSTALL-ZIMAOS.md.
+#
+# Something not working? Run this inside the running container - it prints
+# everything needed to find the cause (devices, permissions, raw drive ioctls):
+#
+#     docker exec -it ripcd ripcd-diagnose
+
+name: ripcd
+
+services:
+  ripcd:
+    image: ghcr.io/delgame880/ripcd-docker:latest
+    # Build locally instead of pulling (comment the image above):
+    # build: .
+    container_name: ripcd
+    restart: unless-stopped
+    devices:
+      # the CD/DVD drive - replace with what `lsscsi -g` prints, e.g. /dev/sr1
+      - /dev/sr0:/dev/sr0
+      # its SCSI generic device. Without this, cdparanoia reports
+      # "unreadable disc" even though the drive is visible.
+      - /dev/sg0:/dev/sg0
+    ports:
+      - target: 8080
+        published: "${WEBUI_PORT:-8080}"
+        protocol: tcp
+    environment:
+      # -- basics ------------------------------------------------------------
+      - TZ=${TZ:-UTC}
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - UMASK=${UMASK:-022}
+      # -- where the music goes ---------------------------------------------
+      # Folders the built-in browser may show (comma separated). Keep this in
+      # sync with the volumes below, RipCD refuses to write anywhere else.
+      - RIPCD_MEDIA_ROOTS=${RIPCD_MEDIA_ROOTS:-/media}
+      # Default destination, changeable in the UI.
+      - RIPCD_OUTPUT_DIR=${RIPCD_OUTPUT_DIR:-/media/Music}
+      - RIPCD_FORMAT=${RIPCD_FORMAT:-flac}
+      # -- optional ----------------------------------------------------------
+      # Password for the web UI. Open http://server:8080/?token=<value> once.
+      - RIPCD_TOKEN=${RIPCD_TOKEN:-}
+      # Seconds between disc scans (2-120).
+      - RIPCD_POLL_INTERVAL=${RIPCD_POLL_INTERVAL:-5}
+      # Identification for the MusicBrainz API (e-mail or homepage).
+      - RIPCD_MUSICBRAINZ_CONTACT=${RIPCD_MUSICBRAINZ_CONTACT:-}
+      # 1 = demo mode: no drive needed, simulated discs (nice for a first look).
+      - RIPCD_MOCK=${RIPCD_MOCK:-0}
+      # 1 = more verbose logs
+      - RIPCD_DEBUG=${RIPCD_DEBUG:-0}
+    # Only needed for USB drives whose "unreadable disc" error is a permission
+    # problem. `ls -l /dev/sr0` on the host shows the group, e.g. `cdrom 24`,
+    # then uncomment and use that number:
+    # group_add:
+    #   - "24"
+    volumes:
+      # settings, rip history, metadata and cover cache - keep this!
+      - ${APPDATA_DIR:-/DATA/AppData/ripcd}:/config
+      # your music share. Everything below here is browsable in the UI.
+      - ${MEDIA_DIR:-/DATA/Media}:/media
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=4)"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+# --------------------------------------------------------------------------- #
+# ZimaOS / CasaOS app store metadata. This block is what makes RipCD show up
+# with an icon and a proper name instead of a bare container.
+# --------------------------------------------------------------------------- #
+x-casaos:
+  id: org.delgame880.ripcd
+  version: "1.0.0"
+  architectures:
+    - amd64
+    - arm64
+  main: ripcd
+  index: /
+  port_map: "8080"
+  scheme: http
+  category: Media
+  icon: https://raw.githubusercontent.com/Delgame880/RipCd-Docker/main/app/static/icon.svg
+  thumbnail: https://raw.githubusercontent.com/Delgame880/RipCd-Docker/main/app/static/icon.svg
+  author: Delgame880
+  developer: Delgame880
+  title:
+    en_US: RipCD
+    es_ES: RipCD
+  tagline:
+    en_US: Rip your audio CDs to the NAS from the browser.
+    es_ES: Digitaliza tus CDs de audio desde el navegador.
+  description:
+    en_US: |
+      RipCD turns audio CDs into properly tagged music files.
+
+      * automatic disc detection: insert a CD, the album appears by itself
+      * MusicBrainz metadata and cover art from the Cover Art Archive
+      * FLAC, ALAC, WAV, MP3, Ogg Vorbis, Opus and AAC output
+      * choose any mounted folder as destination, with a built-in folder browser
+      * optional auto-rip: insert a disc, it rips and ejects on its own
+      * readable layout via templates, {album_artist}/{album} and {track:02d} - {title}
+      * live per-track progress, rip history and an activity log
+
+      The CD drive has to be passed into the container; set PUID/PGID so the
+      files belong to your NAS user.
+    es_ES: |
+      RipCD convierte CDs de audio en archivos de música con etiquetas.
+
+      * detección automática: inserta un CD y el álbum aparece solo
+      * metadatos de MusicBrainz y carátulas del Cover Art Archive
+      * salida en FLAC, ALAC, WAV, MP3, Ogg Vorbis, Opus y AAC
+      * elige cualquier carpeta montada con el explorador integrado
+      * auto-rip opcional: inserta el disco y se ripéa y expulsa solo
+      * progreso por pista, historial y registro de actividad
+
+      El lector de CD debe pasarse al contenedor. Configura PUID/PGID para que
+      los archivos pertenezcan a tu usuario.
+  tips:
+    before_install:
+      en_US: |
+        **Pass the CD drive into the container.**
+
+        1. On the host run `lsscsi -g` (or `ls -l /dev/sr* /dev/sg*`) to find
+           the drive, for example `/dev/sr0` and `/dev/sg1`.
+        2. Put both names in the `devices:` list below.
+        3. Adjust `/DATA/Media` (where the music goes) and
+           `/DATA/AppData/ripcd` (settings and history).
+        4. Set PUID/PGID to your ZimaOS user (`id` in a terminal, usually
+           1000:1000) so the ripped files are owned by you.
+        5. Optional: `RIPCD_TOKEN` protects the web UI with a password, and
+           `RIPCD_MOCK=1` lets you try the app without a CD drive.
+    after_install:
+      en_US: |
+        Open the web UI and insert an audio CD - the album appears within a few
+        seconds. Settings -> Diagnostics shows whether the drive, cdparanoia and
+        ffmpeg were found and how much space is left in the destination folder.
