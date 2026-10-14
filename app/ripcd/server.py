@@ -31,7 +31,7 @@ from .events import EventBus, RingLog, sse_encode
 from .manager import JobManager
 from .metadata import AlbumMetadata, MetadataResolver, MusicBrainzClient
 from .mock import MOCK_DISCS, MOCK_STATE, MockCoverArtClient, MockMetadataClient
-from .optical import OpticalError, device_tree_snapshot
+from .optical import OpticalError, device_diagnosis, device_tree_snapshot
 from .paths import (
     PathNotAllowed,
     check_path,
@@ -295,8 +295,27 @@ def create_app(*, mock: bool | None = None, config_dir: str | None = None) -> Fa
             summaries.append(info)
         return summaries
 
+    def drive_report() -> dict[str, Any]:
+        """Drives the container can see + why they may not work."""
+        tree = device_tree_snapshot()
+        summaries = drive_summaries()
+        disc = ctx.scanner.current()
+        # A drive the scanner could read a table of contents from works, no
+        # matter what its status ioctl claims - do not warn about it.
+        if disc.get("has_disc") and disc.get("device"):
+            for summary in summaries:
+                if summary.get("device") == disc["device"] and summary.get("status") in {"unknown", "error"}:
+                    summary["status"] = "disc_ok"
+                    summary["has_disc"] = True
+        return {
+            "drives": summaries,
+            "device_tree": tree,
+            "diagnosis": device_diagnosis(tree, summaries),
+        }
+
     def state_payload() -> dict[str, Any]:
         current = settings()
+        report = drive_report()
         return {
             "app": APP_NAME,
             "version": __version__,
@@ -319,13 +338,14 @@ def create_app(*, mock: bool | None = None, config_dir: str | None = None) -> Fa
             "metadata_providers": METADATA_PROVIDERS,
             "media_roots": current.media_roots,
             "output_status": path_status(current.output_dir),
-            "drives": drive_summaries(),
+            "drives": report["drives"],
             "disc": ctx.scanner.current(),
             "jobs": ctx.manager.list(limit=25),
             "history": ctx.manager.history[:25],
             "logs": ctx.ring.tail(limit=120),
             "queue": ctx.manager.queue_state(),
-            "device_tree": device_tree_snapshot(),
+            "device_tree": report["device_tree"],
+            "diagnosis": report["diagnosis"],
         }
 
     # ---- meta ---------------------------------------------------------- #
@@ -433,7 +453,7 @@ def create_app(*, mock: bool | None = None, config_dir: str | None = None) -> Fa
 
     @app.get("/api/drives", dependencies=[Depends(guard)])
     async def get_drives() -> dict[str, Any]:
-        return {"drives": drive_summaries(), "device_tree": device_tree_snapshot()}
+        return drive_report()
 
     @app.post("/api/drive/eject", dependencies=[Depends(guard)])
     async def eject(device: str | None = None) -> dict[str, Any]:
@@ -463,7 +483,10 @@ def create_app(*, mock: bool | None = None, config_dir: str | None = None) -> Fa
     @app.post("/api/drives/rescan", dependencies=[Depends(guard)])
     async def rescan_devices() -> dict[str, Any]:
         ctx.drives.refresh(force=True)
-        return {"drives": drive_summaries(), "device_tree": device_tree_snapshot()}
+        report = drive_report()
+        # A drive that appeared after start-up has to be picked up right away.
+        await asyncio.to_thread(ctx.scanner.refresh)
+        return report
 
     # ---- disc & metadata ----------------------------------------------- #
 

@@ -73,7 +73,8 @@ COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 COPY app/ /app/
 COPY scripts/entrypoint.sh /usr/local/bin/ripcd-entrypoint
-RUN chmod 0755 /usr/local/bin/ripcd-entrypoint \
+COPY scripts/diagnose.sh /usr/local/bin/ripcd-diagnose
+RUN chmod 0755 /usr/local/bin/ripcd-entrypoint /usr/local/bin/ripcd-diagnose \
  && mkdir -p /config /media /data
 
 VOLUME ["/config"]

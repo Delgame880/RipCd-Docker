@@ -280,3 +280,132 @@ def test_sg_mapping_matches_sysfs():
     for key, value in mapping.items():
         assert key.startswith("sr") or key.startswith("scd")
         assert value.startswith("/dev/")
+
+
+# --------------------------------------------------------------------------- #
+# Drive status: an inconclusive ioctl must not hide a inserted disc
+# --------------------------------------------------------------------------- #
+import errno
+import os as _os
+
+from ripcd.optical import (
+    CDS_DISC_NO_INFO,
+    CDS_DISC_OK,
+    CDS_NO_DISC,
+    CDS_NO_INFO,
+    CDS_TRAY_OPEN,
+    NoDiscError,
+    OpticalDrive as _Drive,
+    OpticalError,
+    device_diagnosis,
+)
+
+
+class FakeDrive(_Drive):
+    """A drive whose ioctls are replaced by the test (no hardware needed)."""
+
+    def __init__(self, *, drive_status=CDS_DISC_OK, disc_status=103, toc=None, open_error=None):
+        super().__init__("/dev/sr0")
+        self._drive_status = drive_status
+        self._disc_status = disc_status
+        self._toc = toc
+        self._open_error = open_error
+
+    def _open(self, write: bool = False) -> int:
+        if self._open_error is not None:
+            # mirrors OpticalDrive._open, which records the reason for the UI
+            self.last_error = f"cannot open {self.device}: {self._open_error.strerror}"
+            raise OpticalError(self.last_error, err=self._open_error, device=self.device)
+        return _os.open(_os.devnull, _os.O_RDONLY)
+
+    def _drive_status_ioctl(self, fd: int) -> int:
+        if isinstance(self._drive_status, OSError):
+            raise self._drive_status
+        return self._drive_status
+
+    def _disc_status_ioctl(self, fd: int) -> int:
+        if isinstance(self._disc_status, OSError):
+            raise self._disc_status
+        return self._disc_status
+
+    def _toc_from_fd(self, fd: int):
+        if self._toc is None:
+            raise NoDiscError("empty")
+        return self._toc
+
+
+def test_status_reports_permission_denied():
+    drive = FakeDrive(open_error=OSError(errno.EACCES, "permission denied"))
+    assert drive.status() == "permission"
+    assert "permission" in drive.last_error or "uid" in drive.last_error
+
+
+def test_status_of_an_empty_drive():
+    # an empty drive answers "no disc" and the disc-status ioctl has nothing to
+    # say either: that has to stay "no_disc", not become "disc_ok"
+    empty = FakeDrive(drive_status=CDS_NO_DISC, disc_status=CDS_DISC_NO_INFO, toc=None)
+    assert empty.status() == "no_disc"
+    assert FakeDrive(drive_status=CDS_TRAY_OPEN, disc_status=CDS_DISC_NO_INFO, toc=None).status() == "tray_open"
+
+
+def test_status_trusts_a_readable_toc_when_the_ioctl_is_unsure():
+    """Several USB bridges answer CDS_NO_INFO even with a disc inserted."""
+    drive = FakeDrive(drive_status=CDS_NO_INFO, toc=make_toc(offsets=[150, 9000], leadout=20000))
+    assert drive.status() == "disc_ok"
+
+
+def test_status_falls_back_to_the_disc_status_ioctl():
+    drive = FakeDrive(drive_status=CDS_NO_INFO, disc_status=103, toc=None)  # CDS_AUDIO
+    # no TOC, but the disc status says there is audio in the drive
+    drive._toc_from_fd = lambda fd: (_ for _ in ()).throw(OpticalError("no toc"))
+    assert drive.status() == "disc_ok"
+
+
+def test_status_is_unknown_when_the_drive_does_not_answer_at_all():
+    drive = FakeDrive(drive_status=errno.ENOTTY, disc_status=errno.ENOTTY)
+    drive._toc_from_fd = lambda fd: (_ for _ in ()).throw(OpticalError("no toc"))
+    drive._drive_status_ioctl = lambda fd: (_ for _ in ()).throw(OSError(errno.ENOTTY, "bad ioctl"))
+    drive._disc_status_ioctl = lambda fd: (_ for _ in ()).throw(OSError(errno.ENOTTY, "bad ioctl"))
+    assert drive.status() == "unknown"
+
+
+# --------------------------------------------------------------------------- #
+# Diagnosis shown in the UI
+# --------------------------------------------------------------------------- #
+def _tree(devices, sysfs=("/dev/sr0",)):
+    return {"devices": {path: present for path, present in devices.items()}, "sr_in_sysfs": list(sysfs)}
+
+
+def test_diagnosis_is_quiet_when_the_drive_works():
+    report = device_diagnosis(_tree({"/dev/sr0": True, "/dev/sg0": True}), [{"device": "/dev/sr0", "status": "disc_ok"}])
+    assert report["ok"] is True
+    assert report["problem"] == ""
+    assert report["compose"] == ""
+
+
+def test_diagnosis_explains_a_missing_device_passthrough():
+    """The host has the drive, the container does not: the classic mistake."""
+    report = device_diagnosis(_tree({"/dev/sr0": False, "/dev/sg0": False}), [])
+    assert "cannot see the CD/DVD drive" in report["problem"]
+    assert "/dev/sr0:/dev/sr0" in report["compose"]
+    assert "/dev/sg0:/dev/sg0" in report["compose"]
+    assert report["host_devices"] == ["/dev/sr0"]
+
+
+def test_diagnosis_mentions_missing_generic_device():
+    report = device_diagnosis(_tree({"/dev/sr0": True}), [{"device": "/dev/sr0", "status": "error"}])
+    assert "SCSI generic" in report["problem"]
+    assert "/dev/sg0:/dev/sg0" in report["compose"]
+
+
+def test_diagnosis_explains_a_permission_problem():
+    report = device_diagnosis(
+        _tree({"/dev/sr0": True, "/dev/sg0": True}), [{"device": "/dev/sr0", "status": "permission"}]
+    )
+    assert "not allowed to open /dev/sr0" in report["problem"]
+    assert "group_add" in report["hint"]
+
+
+def test_diagnosis_handles_a_host_without_any_drive():
+    report = device_diagnosis(_tree({"/dev/sr0": False}, sysfs=()), [])
+    assert "no CD/DVD drive was found" in report["problem"]

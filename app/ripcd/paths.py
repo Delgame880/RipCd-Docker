@@ -177,6 +177,15 @@ def is_within(path: str, roots: Iterable[str]) -> bool:
     return False
 
 
+def container_user() -> str:
+    """``uid 1000, gid 1000`` - who the app runs as inside the container."""
+    try:
+        uid, gid = os.getuid(), os.getgid()
+    except AttributeError:  # pragma: no cover - not POSIX
+        return "unknown user"
+    return f"uid {uid}, gid {gid}"
+
+
 def deepest_existing(path: str) -> str:
     """The closest existing ancestor of ``path`` (or ``path`` itself)."""
     candidate = _real(path)
@@ -215,13 +224,19 @@ def check_path(path: str, roots: Iterable[str], *, must_exist: bool = False) -> 
     if not exists:
         check.ok = writable
         if not writable:
-            check.error = f"'{working}' is not writable by the container user"
+            check.error = (
+                f"'{working}' is not writable by the container user (running as {container_user()}) - "
+                "set PUID/PGID to the owner of the share or chown it"
+            )
         elif must_exist:
             check.ok = False
             check.error = "folder does not exist"
     elif not writable:
         check.ok = False
-        check.error = "folder exists but is not writable by the container user"
+        check.error = (
+            f"'{working}' exists but is not writable by the container user "
+            f"(running as {container_user()}) - set PUID/PGID to the owner of the share or chown it"
+        )
     return check
 
 

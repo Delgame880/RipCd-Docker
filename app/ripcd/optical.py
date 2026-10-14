@@ -594,6 +594,8 @@ class OpticalDrive:
         self._cached_toc: Toc | None = None
         self._cached_at = 0.0
         self._capabilities: int | None = None
+        #: last error seen while talking to the device (shown in the UI)
+        self.last_error = ""
         self.is_mock = False
 
     # -- identity ----------------------------------------------------------- #
@@ -649,11 +651,13 @@ class OpticalDrive:
         try:
             return os.open(self.device, flags | os.O_NONBLOCK | os.O_CLOEXEC)
         except OSError as exc:
-            raise OpticalError(
-                f"cannot open {self.device}: {exc.strerror or exc}",
-                err=exc,
-                device=self.device,
-            ) from exc
+            if exc.errno in {errno.EACCES, errno.EPERM}:
+                self.last_error = (
+                    f"no permission to open {self.device} as uid {os.getuid()}/gid {os.getgid()}"
+                )
+            else:
+                self.last_error = f"cannot open {self.device}: {exc.strerror or exc}"
+            raise OpticalError(self.last_error, err=exc, device=self.device) from exc
 
     def capabilities(self) -> int:
         """``CDROM_GET_CAPABILITY`` bit mask (0 when the drive does not answer)."""
@@ -687,28 +691,69 @@ class OpticalDrive:
         return bool(capabilities & CDC_PLAY_AUDIO) or bool(capabilities & CDC_DVD)
 
     def status(self) -> str:
-        """``disc_ok``, ``no_disc``, ``tray_open``, ``not_ready`` or ``error``."""
+        """What the drive reports about itself.
+
+        One of ``disc_ok``, ``no_disc``, ``tray_open``, ``not_ready``,
+        ``permission`` (the device exists but we may not open it) or ``error``.
+
+        ``CDROM_DRIVE_STATUS`` is not trustworthy on every bridge: some answer
+        ``CDS_NO_INFO`` (or nothing at all) with a disc in the tray, so an
+        inconclusive answer is double checked by actually looking for a disc.
+        """
         try:
             fd = self._open()
-        except OpticalError:
+        except OpticalError as exc:
+            if exc.errno in {errno.EACCES, errno.EPERM}:
+                return "permission"
             return "error"
         try:
             try:
-                value = int(_ioctl(fd, CDROM_DRIVE_STATUS, 0) or 0)
+                value = int(self._drive_status_ioctl(fd) or 0)
             except OSError as exc:
                 if exc.errno in {errno.ENOMEDIUM, errno.EIO, errno.ENODEV}:
                     return "no_disc"
                 log.debug("drive status of %s failed: %s", self.device, _errno_name(exc))
-                return "error"
+                value = 0
             if value == CDS_DISC_OK:
                 return "disc_ok"
             if value == CDS_TRAY_OPEN:
                 return "tray_open"
             if value == CDS_DRIVE_NOT_READY:
                 return "not_ready"
-            return "no_disc"
+            # CDS_NO_INFO / CDS_NO_DISC / an ioctl error: ask the disc itself.
+            probe = self._probe_disc(fd)
+            if probe == "disc_ok":
+                log.debug("%s reports no usable drive status but has a disc", self.device)
+                return "disc_ok"
+            if value == CDS_NO_DISC:
+                return "no_disc"
+            return probe if probe == "no_disc" else "unknown"
         finally:
             os.close(fd)
+
+    def _drive_status_ioctl(self, fd: int) -> int:
+        return int(_ioctl(fd, CDROM_DRIVE_STATUS, 0) or 0)
+
+    def _disc_status_ioctl(self, fd: int) -> int:
+        return int(_ioctl(fd, CDROM_DISC_STATUS, 0) or 0)
+
+    def _probe_disc(self, fd: int) -> str:
+        """Is there a readable disc? Used when the status ioctl is unsure."""
+        try:
+            toc = self._toc_from_fd(fd)
+        except (NoDiscError, OpticalError, OSError):
+            toc = None
+        if toc is not None and toc.tracks:
+            return "disc_ok"
+        try:
+            kind = DISC_STATUS_NAMES.get(self._disc_status_ioctl(fd), "unknown")
+        except OSError as exc:
+            if exc.errno in {errno.ENOMEDIUM, errno.EIO, errno.ENODEV}:
+                return "no_disc"
+            return "unknown"
+        if kind in {"audio", "data", "mixed"}:
+            return "disc_ok"
+        return "unknown"
 
     def has_disc(self) -> bool:
         return self.status() == "disc_ok"
@@ -721,7 +766,7 @@ class OpticalDrive:
             return "no_disc"
         try:
             try:
-                value = int(_ioctl(fd, CDROM_DISC_STATUS, 0) or 0)
+                value = self._disc_status_ioctl(fd)
             except OSError:
                 return "unknown"
             return DISC_STATUS_NAMES.get(value, "unknown")
@@ -937,7 +982,9 @@ class OpticalDrive:
             }
         )
         report.update(self.info())
-        if status == "disc_ok":
+        if status in {"disc_ok", "unknown"}:
+            # "unknown" means the status ioctl told us nothing useful - the TOC
+            # is the better answer.
             toc = self.read_toc()
             if toc is not None and toc.tracks:
                 report.update(
@@ -1100,6 +1147,136 @@ def device_tree_snapshot() -> dict[str, Any]:
     }
 
 
+# --------------------------------------------------------------------------- #
+# Diagnosis: explain *why* a drive is not usable, in plain language
+# --------------------------------------------------------------------------- #
+def _device_kind(path: str) -> str:
+    name = os.path.basename(path)
+    if name.startswith(("sr", "scd", "cdrom", "cdwriter", "dvd", "cdrw")):
+        return "block"
+    if name.startswith("sg"):
+        return "generic"
+    return "other"
+
+
+def suggested_devices(tree: dict[str, Any] | None = None) -> list[str]:
+    """Device list to put into the compose file, based on what exists."""
+    tree = tree or device_tree_snapshot()
+    present = [path for path, exists in (tree.get("devices") or {}).items() if exists]
+    block = [path for path in tree.get("sr_in_sysfs") or [] if os.path.basename(path).startswith("sr")]
+    block = [path for path in block if path not in present] + [p for p in present if _device_kind(p) == "block"]
+    generic = [p for p in present if _device_kind(p) == "generic"]
+    if not block:
+        block = ["/dev/sr0"]
+    if not generic:
+        # the SCSI generic sibling of sr0 is sg0 on single drive systems
+        number = "".join(ch for ch in os.path.basename(block[0]) if ch.isdigit()) or "0"
+        generic = [f"/dev/sg{number}"]
+    return [*sorted(dict.fromkeys(block)), *sorted(dict.fromkeys(generic))]
+
+
+def compose_snippet(tree: dict[str, Any] | None = None) -> str:
+    """The ``devices:`` block a user has to add to their compose file."""
+    lines = ["    devices:"]
+    lines += [f"      - {path}:{path}" for path in suggested_devices(tree)]
+    return "\n".join(lines)
+
+
+def device_diagnosis(
+    tree: dict[str, Any] | None = None,
+    drives: Sequence[dict[str, Any]] = (),
+) -> dict[str, Any]:
+    """Turn the raw device information into something a user can act on.
+
+    ``drives`` are the summaries from ``/api/drives`` (or an empty sequence when
+    nothing was found).  The returned dict is meant to be shown as-is in the UI:
+
+    ``ok``       - a usable drive was found
+    ``problem``  - one sentence describing what is wrong ("" when there is none)
+    ``hint``     - what to do about it
+    ``compose``  - the ``devices:`` block to add, when relevant
+    ``devices``  - device nodes the container can see
+    ``host_devices`` - device nodes the kernel exposes
+    """
+    tree = tree or device_tree_snapshot()
+    present = sorted(path for path, exists in (tree.get("devices") or {}).items() if exists)
+    block_devices = [path for path in present if _device_kind(path) == "block"]
+    generic_devices = [path for path in present if _device_kind(path) == "generic"]
+    host_devices = list(tree.get("sr_in_sysfs") or [])
+    statuses = {str(summary.get("status", "")) for summary in drives}
+    devices_of = [str(summary.get("device", "")) for summary in drives] or block_devices
+
+    report: dict[str, Any] = {
+        "ok": False,
+        "problem": "",
+        "hint": "",
+        "compose": "",
+        "devices": present,
+        "host_devices": host_devices,
+        "generic_devices": generic_devices,
+    }
+
+    def finish(problem: str, hint: str, *, compose: bool = False) -> dict[str, Any]:
+        report["problem"] = problem
+        report["hint"] = hint
+        if compose:
+            report["compose"] = compose_snippet(tree)
+        return report
+
+    if drives and not statuses & {"permission", "error", "unknown"}:
+        report["ok"] = True
+        return report
+
+    if not block_devices:
+        if host_devices:
+            return finish(
+                "the container cannot see the CD/DVD drive, even though the host has one",
+                "The drive has to be passed into the container. Add the block device and its "
+                "SCSI generic sibling to the compose file, then recreate the container "
+                "(docker compose up -d --force-recreate):",
+                compose=True,
+            )
+        return finish(
+            "no CD/DVD drive was found",
+            "Connect a drive (internal SATA or USB) and check that the host sees it - "
+            "`lsscsi -g` or `lsblk` should list something like /dev/sr0. If the drive is "
+            "USB, plug it in before creating the container. A correct setup looks like this:",
+            compose=True,
+        )
+
+    if "permission" in statuses:
+        device = devices_of[0] if devices_of else "/dev/sr0"
+        return finish(
+            f"the app is not allowed to open {', '.join(devices_of)}",
+            "The device node exists but the container user cannot open it. Either run the "
+            "container as root (PUID=0, PGID=0) or give it the group that owns the device: "
+            f"run `ls -l {device}` on the host, note the group number (24 for 'cdrom' on most "
+            "systems) and add it to the service in docker-compose.yml:\n"
+            "    group_add:\n      - \"24\"\n"
+            "then recreate the container: docker compose up -d --force-recreate",
+        )
+
+    if not generic_devices:
+        return finish(
+            "the CD drive is there, but the SCSI generic device (/dev/sg*) is missing",
+            "cdparanoia needs both devices; without /dev/sg* reading the disc fails with "
+            "'unreadable disc'. Add it next to the block device and recreate the container:",
+            compose=True,
+        )
+
+    if "error" in statuses or "unknown" in statuses:
+        return finish(
+            f"the drive at {', '.join(devices_of)} did not answer",
+            "The device node exists but the drive does not respond to the CD-ROM commands. "
+            "This usually means the container is missing the SCSI generic device, or the "
+            "device is a plain bind mount instead of a real device passthrough. Use "
+            "`devices:` (not `-v`) in the compose file:",
+            compose=True,
+        )
+
+    return report
+
+
 __all__ = [
     "CDC_PLAY_AUDIO",
     "CDS_AUDIO",
@@ -1115,6 +1292,8 @@ __all__ = [
     "TrackInfo",
     "cdparanoia_toc",
     "cdrom_info",
+    "compose_snippet",
+    "device_diagnosis",
     "device_tree_snapshot",
     "disc_id_payload",
     "disc_signature",
@@ -1133,6 +1312,7 @@ __all__ = [
     "musicbrainz_toc_string",
     "parse_cdparanoia_toc",
     "parse_msf",
+    "suggested_devices",
     "toc_candidates",
 ]
 

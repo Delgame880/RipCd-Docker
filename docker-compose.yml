@@ -10,6 +10,11 @@
 #   2. the share where the music should land must be mounted below /media
 #
 # A commented copy with ZimaOS specific values is in docs/INSTALL-ZIMAOS.md.
+#
+# Something not working? Run this inside the running container - it prints
+# everything needed to find the cause (devices, permissions, raw drive ioctls):
+#
+#     docker exec -it ripcd ripcd-diagnose
 
 name: ripcd
 

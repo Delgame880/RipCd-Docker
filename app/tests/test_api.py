@@ -458,3 +458,41 @@ def test_every_endpoint_the_ui_calls_exists(client):
 
     missing = sorted(call for call in calls if not matches(*call))
     assert missing == [], f"the UI calls endpoints that do not exist: {missing}"
+
+
+# --------------------------------------------------------------------------- #
+# Drive diagnostics: the app has to explain itself when it cannot use the drive
+# --------------------------------------------------------------------------- #
+
+
+def test_demo_mode_has_no_drive_problem(client):
+    state = client.get("/api/state").json()
+    assert state["diagnosis"]["ok"] is True
+    assert state["diagnosis"]["problem"] == ""
+    assert client.get("/api/drives").json()["diagnosis"]["ok"] is True
+
+
+def test_state_explains_a_missing_drive(tmp_path, monkeypatch):
+    """Without a drive the API has to say so and how to fix it."""
+    from ripcd.optical import find_device_paths
+
+    if find_device_paths():
+        pytest.skip("this machine really has a CD drive")
+
+    monkeypatch.setenv("RIPCD_MEDIA_ROOTS", str(tmp_path))
+    monkeypatch.setenv("RIPCD_OUTPUT_DIR", str(tmp_path))
+    app = create_app(mock=False, config_dir=str(tmp_path / "config"))
+    with TestClient(app) as client:
+        report = client.get("/api/drives").json()
+        assert report["drives"] == []
+        diagnosis = report["diagnosis"]
+        assert diagnosis["ok"] is False
+        assert diagnosis["problem"]
+        assert diagnosis["hint"]
+        # it should tell the user how to pass the drive through
+        assert "/dev/sr0:/dev/sr0" in diagnosis["compose"]
+
+        disc = client.get("/api/disc").json()
+        assert disc["status"] == "no_drive"
+        assert disc["error"]
+        assert disc["hint"]

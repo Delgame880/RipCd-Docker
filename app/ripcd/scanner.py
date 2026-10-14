@@ -16,7 +16,7 @@ from .drives import DriveProvider
 from .events import EventBus
 from .metadata import AlbumMetadata, MetadataResolver
 from .manager import JobManager
-from .optical import Toc, disc_signature
+from .optical import Toc, device_diagnosis, disc_signature
 from .ripper import RipJob, make_job
 
 log = logging.getLogger("ripcd.scanner")
@@ -83,6 +83,7 @@ class DiscScanner:
             "inserted_at": 0.0,
             "auto_rip": {"enabled": False, "armed": False, "seconds_left": 0, "skipped": ""},
             "error": "",
+            "hint": "",
             "updated_at": time.time(),
         }
 
@@ -124,8 +125,16 @@ class DiscScanner:
         now = time.time()
 
         if drive is None:
+            diagnosis = device_diagnosis()
             state = self._empty_state()
-            state.update({"status": "no_drive", "error": "no optical drive found", "updated_at": now})
+            state.update(
+                {
+                    "status": "no_drive",
+                    "error": diagnosis.get("problem") or "no optical drive found",
+                    "hint": diagnosis.get("hint") or "",
+                    "updated_at": now,
+                }
+            )
             self._commit(previous, state, event="drives")
             return state
 
@@ -149,12 +158,30 @@ class DiscScanner:
             }
         )
 
-        if status != "disc_ok":
-            state["auto_rip"]["enabled"] = bool(settings.auto_rip)
+        state["auto_rip"]["enabled"] = bool(settings.auto_rip)
+
+        if status in {"tray_open", "no_disc"}:
             self._auto_pending = None
             self._commit(previous, state, event="disc")
             return state
 
+        if status == "permission":
+            state.update(
+                {
+                    "error": drive.last_error or f"no permission to open {drive.device}",
+                    "hint": (
+                        "The device node exists but the app cannot open it. Run the container as "
+                        "root (PUID=0, PGID=0) or pass the group that owns the drive with "
+                        "group_add (see Settings -> Diagnostics)."
+                    ),
+                }
+            )
+            self._auto_pending = None
+            self._commit(previous, state, event="disc")
+            return state
+
+        # "disc_ok" is the normal answer, but an inconclusive one is not a
+        # reason to give up: the TOC is the ground truth, so try to read it.
         toc: Toc | None = None
         try:
             toc = drive.read_toc(use_cache=not force_toc)
@@ -162,7 +189,18 @@ class DiscScanner:
             state["error"] = f"cannot read the table of contents: {exc}"
 
         if toc is None or not toc.tracks:
-            state.update({"has_disc": True, "kind": "unknown", "error": state.get("error") or "reading the disc"})
+            diagnosis = device_diagnosis(drives=[])
+            state.update(
+                {
+                    "has_disc": False,
+                    "kind": "unknown",
+                    "error": state.get("error")
+                    or drive.last_error
+                    or "the disc could not be read (the drive did not report a table of contents)",
+                    "hint": diagnosis.get("hint", ""),
+                }
+            )
+            self._auto_pending = None
             self._commit(previous, state, event="disc")
             return state
 

@@ -166,35 +166,79 @@
 
   const DISC_ICON = `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="16" cy="16" r="13"/><circle cx="16" cy="16" r="4"/><path d="M16 3v4M16 25v4M3 16h4M25 16h4"/></svg>`;
 
+  // Plain-language explanation of what is wrong with the drive, with the fix.
+  function driveProblem(title) {
+    const diag = state.diagnosis || {};
+    const devices = (diag.devices || []).join(", ") || "none";
+    const hostDevices = (diag.host_devices || []).join(", ") || "none";
+    const writable = (state.outputStatus || {}).ok !== false;
+    const saveError = (state.outputStatus || {}).error || "";
+    return `<div class="problem">
+      <h2>${esc(title || diag.problem || "The CD drive is not usable")}</h2>
+      ${diag.problem && title ? `<p class="muted">${esc(diag.problem)}</p>` : ""}
+      ${diag.hint ? `<p class="hint-text">${esc(diag.hint)}</p>` : ""}
+      ${diag.compose ? `<pre class="code">${esc(diag.compose)}</pre>` : ""}
+      ${!writable && saveError ? `<p class="hint-text">Save folder: ${esc(saveError)}</p>` : ""}
+      <div class="diag">
+        <div class="item"><b>Devices in the container</b><span class="val ${devices === "none" ? "bad" : "good"}">${esc(devices)}</span></div>
+        <div class="item"><b>Devices on the host</b><span class="val ${hostDevices === "none" ? "bad" : ""}">${esc(hostDevices)}</span></div>
+        <div class="item"><b>Save folder writable</b><span class="val ${writable ? "good" : "bad"}">${writable ? "yes" : "no"}</span></div>
+      </div>
+      <div class="disc-actions" style="justify-content:center">
+        <button class="btn" id="btnEmptyRescan">Scan again</button>
+        <button class="btn ghost" id="btnEmptySettings">Open diagnostics</button>
+      </div>
+    </div>`;
+  }
+
+  function bindEmptyActions() {
+    if ($("btnEmptyRescan")) $("btnEmptyRescan").onclick = () => rescan(true);
+    if ($("btnEmptySettings")) $("btnEmptySettings").onclick = () => openSettings("diagnostics");
+    if ($("btnEmptyClose")) $("btnEmptyClose").onclick = () => api.post("/api/drive/close").then(() => toast("Tray closed", "")).catch(showError);
+  }
+
   function renderDisc() {
     const card = $("discCard");
     const disc = state.disc || {};
     const job = state.queue && state.queue.active;
 
     if (!disc.device) {
+      if (disc.status === "no_drive") {
+        // The scanner looked and found nothing: tell the user why.
+        card.innerHTML = driveProblem();
+        bindEmptyActions();
+        return;
+      }
       card.innerHTML = `<div class="empty-state">
         <div class="spinner"></div>
         <h2>Looking for a drive…</h2>
-        <p class="muted">RipCD is scanning <code>/dev/sr*</code>. If this stays here, the optical drive is probably not
-        passed into the container - see the Settings dialog for diagnostics.</p>
+        <p class="muted">RipCD is scanning <code>/dev/sr*</code>.</p>
       </div>`;
       return;
     }
 
     if (!disc.has_disc) {
       const autoRip = state.settings.auto_rip;
+      const trayOpen = disc.status === "tray_open";
+      // A disc that is there but cannot be read, or a drive that does not
+      // answer, is a problem - not an empty tray. Say so.
+      if (disc.error && !trayOpen) {
+        card.innerHTML = driveProblem(disc.error);
+        bindEmptyActions();
+        return;
+      }
       card.innerHTML = `<div class="empty-state">
         <div class="big-icon">${DISC_ICON}</div>
-        <h2>Insert an audio CD</h2>
+        <h2>${trayOpen ? "The tray is open" : "Insert an audio CD"}</h2>
         <p class="muted">RipCD watches <code>${esc(disc.device)}</code> automatically - the disc will appear here the moment
-        you close the tray.${autoRip ? " <strong>Auto-rip is on</strong>, so ripping starts by itself." : ""}</p>
+        you ${trayOpen ? "close the tray" : "insert a CD"}.${autoRip ? " <strong>Auto-rip is on</strong>, so ripping starts by itself." : ""}</p>
+        ${disc.hint ? `<p class="hint-text">${esc(disc.hint)}</p>` : ""}
         <div class="disc-actions" style="justify-content:center">
           <button class="btn" id="btnEmptyRescan">Scan now</button>
           <button class="btn ghost" id="btnEmptyClose">Close tray</button>
         </div>
       </div>`;
-      $("btnEmptyRescan").onclick = () => rescan(true);
-      $("btnEmptyClose").onclick = () => api.post("/api/drive/close").then(() => toast("Tray closed", "")).catch(showError);
+      bindEmptyActions();
       return;
     }
 
@@ -576,6 +620,15 @@
     $("footerMeta").textContent = `RipCD ${state.version} · ${parts.join(" · ")}`;
   }
 
+  function openSettings(section) {
+    $("settingsModal").hidden = false;
+    renderSettingsModal();
+    if (section === "diagnostics") {
+      const node = $("settingsDiag");
+      if (node) node.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+
   function renderSettingsModal() {
     const settings = state.settings || {};
     $("setAutoscan").checked = settings.autoscan !== false;
@@ -598,15 +651,24 @@
 
     const tools = (state.system || {}).tools || {};
     const tree = state.deviceTree || {};
-    const items = [
+    const diag = state.diagnosis || {};
+    const items = [];
+    if (diag.problem) items.push(["Drive problem", diag.problem, "bad"]);
+    if (diag.hint) items.push(["How to fix it", diag.hint, ""]);
+    items.push(
       ["Version", `RipCD ${state.version}${state.mock ? " (demo)" : ""}`, ""],
       ["cdparanoia", tools.cdparanoia && tools.cdparanoia.available ? tools.cdparanoia.version || "installed" : "missing", tools.cdparanoia && tools.cdparanoia.available ? "good" : "bad"],
       ["ffmpeg", tools.ffmpeg && tools.ffmpeg.available ? tools.ffmpeg.version || "installed" : "missing", tools.ffmpeg && tools.ffmpeg.available ? "good" : "bad"],
       ["Devices visible", Object.keys(tree.devices || {}).filter((d) => tree.devices[d]).join(", ") || "none", Object.keys(tree.devices || {}).some((d) => tree.devices[d]) ? "good" : "bad"],
       ["sr* in /sys", (tree.sr_in_sysfs || []).join(", ") || "none", (tree.sr_in_sysfs || []).length ? "good" : "bad"],
       ["sg* in /sys", (tree.sg_in_sysfs || []).join(", ") || "none", ""],
+      ["Save folder", (state.outputStatus || {}).ok === false
+        ? (state.outputStatus.error || "not writable")
+        : ((state.outputStatus || {}).writable ? "writable" : "unknown"),
+       (state.outputStatus || {}).ok === false ? "bad" : "good"],
       ["Free space", (state.outputStatus && state.outputStatus.free_bytes) ? fmtBytes(state.outputStatus.free_bytes) : "unknown", ""],
-    ];
+      ["Running as", `uid ${((state.system || {}).uid ?? "?")} / gid ${((state.system || {}).gid ?? "?")}`, ""],
+    );
     $("settingsDiag").innerHTML = items
       .map(([label, value, cls]) => `<div class="item"><b>${esc(label)}</b><span class="val ${cls}">${esc(value)}</span></div>`)
       .join("");
@@ -682,6 +744,7 @@
     state.history = data.history || [];
     state.logs = data.logs || [];
     state.deviceTree = data.device_tree || {};
+    state.diagnosis = data.diagnosis || {};
     if (!state.disc || (data.disc && data.disc.signature !== state.disc.signature)) {
       applyDisc(data.disc);
     } else {
@@ -916,7 +979,7 @@
     };
 
     // settings modal
-    $("btnSettings").onclick = () => { $("settingsModal").hidden = false; renderSettingsModal(); };
+    $("btnSettings").onclick = () => openSettings();
     $("setAutoscan").onchange = () => saveSettings({ autoscan: $("setAutoscan").checked });
     $("setAutoRip").onchange = () => saveSettings({ auto_rip: $("setAutoRip").checked });
     $("setAutoRipDelay").onchange = () => saveSettings({ auto_rip_delay: Number($("setAutoRipDelay").value) });
