@@ -93,10 +93,11 @@ jobs:
           sbom: true
 
   smoke:
-    name: Smoke test the image (amd64)
+    name: Smoke test the built image
+    # Independent of the matrix above: this builds the image for the runner's
+    # own platform and really starts it, so "latest" can never be a container
+    # that does not boot. Runs on pull requests too.
     runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
 
