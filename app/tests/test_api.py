@@ -408,3 +408,53 @@ def test_api_token_protects_everything(workspace, monkeypatch):
         assert unlocked.status_code == 200
         assert "ripcd_token" in unlocked.cookies
         assert client.get("/api/state").status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# The web UI and the API must not drift apart
+# --------------------------------------------------------------------------- #
+
+
+def _api_routes() -> set[tuple[str, str]]:
+    from ripcd.server import create_app
+
+    app = create_app(mock=True)
+    routes: set[tuple[str, str]] = set()
+    for route in app.routes:
+        path = getattr(route, "path", "")
+        for method in getattr(route, "methods", None) or set():
+            routes.add((method.upper(), path))
+    return routes
+
+
+def test_every_endpoint_the_ui_calls_exists(client):
+    """Every ``api.get/post/...`` in app.js has to have a matching route."""
+    import re
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text()
+    routes = _api_routes()
+    calls: set[tuple[str, str]] = set()
+    for match in re.finditer(r"api\.(get|post|put|del|patch)\(\s*[`\"']([^`\"']+)", js):
+        method = {"del": "DELETE"}.get(match.group(1), match.group(1).upper())
+        url = re.sub(r"\$\{[^}]+\}[^/]*", "{x}", match.group(2)).split("?")[0]
+        calls.add((method, url))
+
+    assert calls, "no API calls found in app.js - the UI changed shape?"
+
+    def matches(method: str, url: str) -> bool:
+        if (method, url) in routes:
+            return True
+        wanted = [part for part in url.split("/") if part]
+        for route_method, route_path in routes:
+            if route_method != method:
+                continue
+            parts = [part for part in route_path.split("/") if part]
+            if len(parts) != len(wanted):
+                continue
+            if all(part.startswith("{") or part == want for part, want in zip(parts, wanted)):
+                return True
+        return False
+
+    missing = sorted(call for call in calls if not matches(*call))
+    assert missing == [], f"the UI calls endpoints that do not exist: {missing}"
