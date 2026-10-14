@@ -1,0 +1,5 @@
+# Runtime dependencies of RipCD (installed into /opt/venv in the image).
+# Everything else is Python standard library on purpose: fewer moving parts on
+# a NAS, and no surprises when a container is rebuilt years later.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
