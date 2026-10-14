@@ -20,6 +20,48 @@ Add `-e RIPCD_DEBUG=1` and restart for verbose logging.
 
 ---
 
+## One command that answers most questions
+
+```sh
+docker exec -it ripcd ripcd-diagnose
+```
+
+It prints who the app runs as, which device nodes exist inside the container,
+what the kernel knows about the drive, the raw drive ioctls and RipCD's own
+diagnosis - enough to tell a missing device passthrough from a permission
+problem. The rest of this file explains what to do with the output.
+
+## "The host sees /dev/sr0 but the app does not"
+
+`lsblk` on the host lists `sr0`, the web UI shows the drive, but no disc ever
+appears or every rip fails. Run the command above - the output tells you which
+of these three it is:
+
+| What you see in the output | What it means | Fix |
+| --- | --- | --- |
+| no `/dev/sr*` inside the container | the drive was not passed through | add it to `devices:` (see below) |
+| `open failed -> [Errno 13] Permission denied` | the container user may not open the device | run as root (`PUID=0`, `PGID=0`) or add `group_add` |
+| `DRIVE_STATUS = 1 (CDS_NO_INFO)` | the drive does not answer the status command properly | update RipCD - from 1.0.0 it reads the TOC anyway |
+| `DRIVE_STATUS failed -> [Errno 25] Inappropriate ioctl` | you bind mounted the device (`-v /dev/sr0:/dev/sr0`) instead of passing it | use `devices:` |
+| `/dev/sr0` exists, `/dev/sg*` does not | cdparanoia has no way to read audio | pass the `/dev/sg*` device too |
+
+The three device settings, in `docker-compose.yml`:
+
+```yaml
+    devices:
+      - /dev/sr0:/dev/sr0
+      - /dev/sg0:/dev/sg0
+    # group_add:
+    #   - "24"          # gid of the device on the host, `ls -l /dev/sr0`
+    environment:
+      - PUID=0          # 0 = root: always allowed to read the drive
+      - PGID=0
+```
+
+Everything changed in those blocks only takes effect after the container is
+recreated - `docker compose up -d --force-recreate` (Docker cannot add a device
+to a running container).
+
 ## The app says "no optical drive found"
 
 The container cannot see the drive.
@@ -74,6 +116,32 @@ the table of contents.
 
    It works, but it gives the container full access to the host - prefer the
    two options above.
+
+## "no permission to open /dev/sr0"
+
+The device node is inside the container but the user RipCD runs as may not open
+it. Two options:
+
+1. Simplest - run as root and use the web UI normally:
+
+   ```yaml
+       environment:
+         - PUID=0
+         - PGID=0
+   ```
+
+2. Cleaner - keep your user, give it the drive's group. Find the group on the
+   host (`ls -l /dev/sr0` -> `brw-rw---- root cdrom`, so the group id of
+   `cdrom`, usually 24) and pass it:
+
+   ```yaml
+       group_add:
+         - "24"
+   ```
+
+   RipCD's entrypoint also tries to add the container user to the group
+   automatically; the log line `added ripcd to group cdrom (gid 24) for
+   /dev/sr0` means it worked.
 
 ## "Cannot open the device" / "Permission denied" while writing files
 

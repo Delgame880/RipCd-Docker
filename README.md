@@ -202,6 +202,10 @@ Settings → **Diagnostics** in the UI already tells you the most common things:
 which devices the container can see, whether `cdparanoia` and `ffmpeg` are
 installed, and how much space is left in the destination folder.
 
+Run `docker exec -it ripcd ripcd-diagnose` inside the container for a full
+report: who the app runs as, which devices it can see, the raw drive ioctls and
+what RipCD makes of them.
+
 | Symptom | First thing to check |
 | --- | --- |
 | "no optical drive found" | `/dev/sr0` and `/dev/sg0` are passed to the container |
@@ -209,6 +213,7 @@ installed, and how much space is left in the destination folder.
 | Disc not detected automatically | Settings → *Poll interval* and *Autoscan* |
 | Files owned by root | set `PUID`/`PGID` to your user |
 | No cover art | the release has no art in the Cover Art Archive; add it there or use overrides |
+| Host sees `/dev/sr0` but the app never shows a disc | pass both devices with `devices:` (not `-v`), and run as root or add the drive's group |
 | Container restarts in a loop | the config volume is not writable |
 
 ## Development
